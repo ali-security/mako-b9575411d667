@@ -1,17 +1,15 @@
 name: Run tests on a pr
 
 on:
-  # run on pull request to main excluding changes that are only on doc or example folders
-  pull_request:
-    branches:
-      - main
-    paths-ignore:
-      - "doc/**"
+  # the upstream `pull_request` trigger is removed so this workflow never fires
+  # unbidden on the sealed-libraries fork
+  workflow_dispatch:
 
 jobs:
   run-test:
     name: ${{ matrix.python-version }}-${{ matrix.os }}-${{matrix.tox-env}}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       # run this job using this matrix
       matrix:

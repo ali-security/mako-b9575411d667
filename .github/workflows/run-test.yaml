@@ -1,25 +1,33 @@
 name: Run tests
 
 on:
-  # run on push in main or rel_* branches excluding changes are only on doc or example folders
-  push:
-    branches:
-      - main
-      - "rel_*"
-      # branches used to test the workflow
-      - "workflow_test_*"
-    paths-ignore:
-      - "docs/**"
+  # dispatched by the sealed-libraries fork build; the upstream `push` trigger is
+  # removed so nothing fires implicitly on the fork sync push
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional pytest posargs (e.g. a test selector)"
+        required: false
+        default: ""
 
 jobs:
   run-test:
     name: ${{ matrix.python-version }}-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      # resolve every dependency as it stood on the 1.2.4 release date, which is
+      # what upstream CI saw when this matrix was green. Left unpinned, Pygments
+      # >= 2.19 changes the HTML it emits and three test_exceptions.py assertions
+      # on the exact markup fail on 3.9/3.10.
+      PIP_INDEX_URL: "https://:2022-11-15@time-machines-pypi.sealsecurity.io/"
     strategy:
       # run this job using this matrix
       matrix:
         os:
-          - "ubuntu-latest"
+          # ubuntu-22.04 is the newest image actions/setup-python still has
+          # CPython 3.7 builds for (24.04 has none)
+          - "ubuntu-22.04"
           - "windows-latest"
           - "macos-latest"
         python-version:
@@ -33,25 +41,78 @@ jobs:
           # See https://github.com/bbangert/beaker/pull/213
           - os: "windows-latest"
             python-version: "3.10"
+          # the fork's macOS runners are arm64-only and CPython gained darwin-arm64
+          # support in 3.9.1: there is no 3.7 binary to install and building it
+          # from source on arm64 fails. The leg is unrunnable, not merely
+          # unprovisioned; 3.8/3.9/3.10 still cover macOS.
+          - os: "macos-latest"
+            python-version: "3.7"
 
       fail-fast: false
 
     # steps to run in each job. Some are github actions, others run shell commands
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set up python
-        uses: actions/setup-python@v2
+        if: runner.os != 'macOS'
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           architecture: ${{ matrix.architecture }}
 
+      # the fork's only macOS runners are arm64, and actions/setup-python has no
+      # darwin-arm64 build for these CPythons; this drop-in resolves or builds one
+      - name: Set up python (macOS arm64)
+        if: runner.os == 'macOS'
+        uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-build: true
+          allow-build: allow
+
       - name: Install dependencies
+        # setuptools is pinned with `==` rather than `--upgrade`d: tox's own
+        # release-era `packaging` lands in site-packages and shadows the copy the
+        # runner's modern setuptools vendors, so `setup.py sdist` dies on
+        # `canonicalize_version() got an unexpected keyword argument`. Pinning
+        # setuptools to the 1.2.4-era release keeps the two consistent.
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade tox setuptools
+          pip install --upgrade tox 'setuptools==65.5.1'
           pip list
 
       - name: Run tests
-        run: tox
+        run: tox -- ${{ inputs.test-filter }}
+
+  build-artifacts:
+    name: build-artifacts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build tooling
+        # release-era build backend; wheel is pinned so the wheel's
+        # `Generator: bdist_wheel (0.38.4)` matches the published artifact
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url 'https://:2022-11-15@time-machines-pypi.sealsecurity.io/' 'build' 'setuptools==65.5.1' 'wheel==0.38.4'
+          pip list
+
+      - name: Build sdist and wheel
+        run: python -m build --no-isolation
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
